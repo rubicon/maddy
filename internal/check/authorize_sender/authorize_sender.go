@@ -20,7 +20,6 @@ package authorize_sender
 
 import (
 	"context"
-	"fmt"
 	"net/mail"
 
 	"github.com/emersion/go-message/textproto"
@@ -49,8 +48,8 @@ type Check struct {
 	noMatchAction modconfig.FailAction
 	errAction     modconfig.FailAction
 
-	fromNorm func(string) (string, error)
-	authNorm func(string) (string, error)
+	fromNorm authz.NormalizeFunc
+	authNorm authz.NormalizeFunc
 }
 
 func New(_, instName string, _, inlineArgs []string) (module.Module, error) {
@@ -89,27 +88,13 @@ func (c *Check) Init(cfg *config.Map) error {
 		return modconfig.FailAction{Reject: true}, nil
 	}, modconfig.FailActionDirective, &c.errAction)
 
-	var (
-		authNormalize string
-		fromNormalize string
-		ok            bool
-	)
-	cfg.String("auth_normalize", false, false,
-		"precis_casefold_email", &authNormalize)
-	cfg.String("from_normalize", false, false,
-		"precis_casefold_email", &fromNormalize)
+	config.EnumMapped(cfg, "auth_normalize", true, false, authz.NormalizeFuncs, authz.NormalizeAuto,
+		&c.authNorm)
+	config.EnumMapped(cfg, "from_normalize", true, false, authz.NormalizeFuncs, authz.NormalizeAuto,
+		&c.fromNorm)
 
 	if _, err := cfg.Process(); err != nil {
 		return err
-	}
-
-	c.authNorm, ok = authz.NormalizeFuncs[authNormalize]
-	if !ok {
-		return fmt.Errorf("%v: unknown normalization function: %v", modName, authNormalize)
-	}
-	c.fromNorm, ok = authz.NormalizeFuncs[fromNormalize]
-	if !ok {
-		return fmt.Errorf("%v: unknown normalization function: %v", modName, fromNormalize)
 	}
 
 	return nil
@@ -162,9 +147,18 @@ func (s *state) authzSender(ctx context.Context, authName, email string) module.
 			}})
 	}
 
+	var preparedEmail []string
+	var ok bool
 	s.log.DebugMsg("normalized names", "from", fromEmailNorm, "auth", authNameNorm)
-
-	preparedEmail, ok, err := s.c.emailPrepare.Lookup(ctx, fromEmailNorm)
+	if emailPrepareMulti, isMulti := s.c.emailPrepare.(module.MultiTable); isMulti {
+		preparedEmail, err = emailPrepareMulti.LookupMulti(ctx, fromEmailNorm)
+		ok = len(preparedEmail) > 0
+	} else {
+		var preparedEmail_single string
+		preparedEmail_single, ok, err = s.c.emailPrepare.Lookup(ctx, fromEmailNorm)
+		preparedEmail = []string{preparedEmail_single}
+	}
+	s.log.DebugMsg("authorized emails", "preparedEmail", preparedEmail, "ok", ok)
 	if err != nil {
 		return s.c.errAction.Apply(module.CheckResult{
 			Reason: &exterrors.SMTPError{
@@ -176,7 +170,7 @@ func (s *state) authzSender(ctx context.Context, authName, email string) module.
 			}})
 	}
 	if !ok {
-		preparedEmail = fromEmailNorm
+		preparedEmail = []string{fromEmailNorm}
 	}
 
 	ok, err = authz.AuthorizeEmailUse(ctx, authNameNorm, preparedEmail, s.c.userToEmail)

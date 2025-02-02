@@ -107,7 +107,14 @@ func readBindDirective(c *config.Map, n config.Node) (interface{}, error) {
 	case "off":
 		return func(*ldap.Conn) error { return nil }, nil
 	case "unauth":
-		return (*ldap.Conn).UnauthenticatedBind, nil
+		if len(n.Args) == 2 {
+			return func(c *ldap.Conn) error {
+				return c.UnauthenticatedBind(n.Args[1])
+			}, nil
+		}
+		return func(c *ldap.Conn) error {
+			return c.UnauthenticatedBind("")
+		}, nil
 	case "plain":
 		if len(n.Args) != 3 {
 			return nil, fmt.Errorf("auth.ldap: username and password expected for plaintext bind")
@@ -140,12 +147,12 @@ func (a *Auth) newConn() (*ldap.Conn, error) {
 			return nil, fmt.Errorf("auth.ldap: invalid server URL: %w", err)
 		}
 		hostname := parsedURL.Host
+		a.tlsCfg.ServerName = strings.Split(hostname, ":")[0]
 		tlsCfg = a.tlsCfg.Clone()
-		a.tlsCfg.ServerName = hostname
 
 		conn, err = ldap.DialURL(u, ldap.DialWithDialer(a.dialer), ldap.DialWithTLSConfig(tlsCfg))
 		if err != nil {
-			a.log.Msg("cannot contact directory server", err, "url", u)
+			a.log.Error("cannot contact directory server", err, "url", u)
 			continue
 		}
 		break
@@ -176,6 +183,7 @@ func (a *Auth) getConn() (*ldap.Conn, error) {
 	if a.conn == nil {
 		conn, err := a.newConn()
 		if err != nil {
+			a.connLock.Unlock()
 			return nil, err
 		}
 		a.conn = conn
@@ -184,6 +192,7 @@ func (a *Auth) getConn() (*ldap.Conn, error) {
 		a.conn.Close()
 		conn, err := a.newConn()
 		if err != nil {
+			a.connLock.Unlock()
 			return nil, err
 		}
 		a.conn = conn

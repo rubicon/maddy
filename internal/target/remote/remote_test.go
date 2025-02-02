@@ -27,7 +27,6 @@ import (
 	"os"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/emersion/go-message/textproto"
 	"github.com/emersion/go-smtp"
@@ -62,8 +61,8 @@ func testTarget(t *testing.T, zones map[string]mockdns.Zone, extResolver *dns.Ex
 		policies:    extraPolicies,
 		limits:      &limits.Group{},
 		pool: pool.New(pool.Config{
-			MaxKeys:             20000,
-			MaxConnsPerKey:      10,     // basically, max. amount of idle connections in cache
+			MaxKeys:             5000,
+			MaxConnsPerKey:      5,      // basically, max. amount of idle connections in cache
 			MaxConnLifetimeSec:  150,    // 2.5 mins, half of recommended idle time from RFC 5321
 			StaleKeyLifetimeSec: 60 * 5, // should be bigger than MaxConnLifetimeSec
 		}),
@@ -154,7 +153,7 @@ func TestRemoteDelivery_NoMXFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := delivery.AddRcpt(context.Background(), "test@example.invalid"); err == nil {
+	if err := delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{}); err == nil {
 		t.Fatal("Expected an error, got none")
 	}
 
@@ -275,7 +274,7 @@ func TestRemoteDelivery_Abort(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := delivery.AddRcpt(context.Background(), "test@example.invalid"); err != nil {
+	if err := delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -305,7 +304,7 @@ func TestRemoteDelivery_CommitWithoutBody(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := delivery.AddRcpt(context.Background(), "test@example.invalid"); err != nil {
+	if err := delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -342,7 +341,7 @@ func TestRemoteDelivery_MAILFROMErr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = delivery.AddRcpt(context.Background(), "test@example.invalid")
+	err = delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{})
 	testutils.CheckSMTPErr(t, err, 550, exterrors.EnhancedCode{5, 1, 2}, "mx.example.invalid. said: Hey")
 
 	if err := delivery.Abort(context.Background()); err != nil {
@@ -368,7 +367,7 @@ func TestRemoteDelivery_NoMX(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := delivery.AddRcpt(context.Background(), "test@example.invalid"); err == nil {
+	if err := delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{}); err == nil {
 		t.Fatal("Expected an error, got none")
 	}
 
@@ -398,7 +397,7 @@ func TestRemoteDelivery_NullMX(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = delivery.AddRcpt(context.Background(), "test@example.invalid")
+	err = delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{})
 	testutils.CheckSMTPErr(t, err, 556, exterrors.EnhancedCode{5, 1, 10}, "Domain does not accept email (null MX)")
 
 	if err := delivery.Abort(context.Background()); err != nil {
@@ -429,7 +428,7 @@ func TestRemoteDelivery_Quarantined(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := delivery.AddRcpt(context.Background(), "test@example.invalid"); err != nil {
+	if err := delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -475,10 +474,10 @@ func TestRemoteDelivery_MAILFROMErr_Repeated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = delivery.AddRcpt(context.Background(), "test@example.invalid")
+	err = delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{})
 	testutils.CheckSMTPErr(t, err, 550, exterrors.EnhancedCode{5, 1, 2}, "mx.example.invalid. said: Hey")
 
-	err = delivery.AddRcpt(context.Background(), "test2@example.invalid")
+	err = delivery.AddRcpt(context.Background(), "test2@example.invalid", smtp.RcptOptions{})
 	testutils.CheckSMTPErr(t, err, 550, exterrors.EnhancedCode{5, 1, 2}, "mx.example.invalid. said: Hey")
 
 	if err := delivery.Abort(context.Background()); err != nil {
@@ -515,12 +514,12 @@ func TestRemoteDelivery_RcptErr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = delivery.AddRcpt(context.Background(), "test@example.invalid")
+	err = delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{})
 	testutils.CheckSMTPErr(t, err, 550, exterrors.EnhancedCode{5, 1, 2}, "mx.example.invalid. said: Hey")
 
 	// It should be possible to, however, add another recipient and continue
 	// delivery as if nothing happened.
-	if err := delivery.AddRcpt(context.Background(), "test2@example.invalid"); err != nil {
+	if err := delivery.AddRcpt(context.Background(), "test2@example.invalid", smtp.RcptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -659,14 +658,14 @@ func TestRemoteDelivery_Split_Fail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = delivery.AddRcpt(context.Background(), "test@example.invalid")
+	err = delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{})
 	if err == nil {
 		t.Fatal("Expected an error, got none")
 	}
 
 	// It should be possible to, however, add another recipient and continue
 	// delivery as if nothing happened.
-	if err := delivery.AddRcpt(context.Background(), "test@example2.invalid"); err != nil {
+	if err := delivery.AddRcpt(context.Background(), "test@example2.invalid", smtp.RcptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -712,7 +711,7 @@ func TestRemoteDelivery_BodyErr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = delivery.AddRcpt(context.Background(), "test@example.invalid")
+	err = delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -766,10 +765,10 @@ func TestRemoteDelivery_Split_BodyErr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := delivery.AddRcpt(context.Background(), "test@example.invalid"); err != nil {
+	if err := delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := delivery.AddRcpt(context.Background(), "test@example2.invalid"); err != nil {
+	if err := delivery.AddRcpt(context.Background(), "test@example2.invalid", smtp.RcptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -822,13 +821,13 @@ func TestRemoteDelivery_Split_BodyErr_NonAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := delivery.AddRcpt(context.Background(), "test@example.invalid"); err != nil {
+	if err := delivery.AddRcpt(context.Background(), "test@example.invalid", smtp.RcptOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := delivery.AddRcpt(context.Background(), "test2@example.invalid"); err != nil {
+	if err := delivery.AddRcpt(context.Background(), "test2@example.invalid", smtp.RcptOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := delivery.AddRcpt(context.Background(), "test@example2.invalid"); err != nil {
+	if err := delivery.AddRcpt(context.Background(), "test@example2.invalid", smtp.RcptOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -982,7 +981,8 @@ func TestRemoteDelivery_TLS_FallbackNoVerify(t *testing.T) {
 	be.CheckMsg(t, 0, "test@example.com", []string{"test@example.invalid"})
 
 	// But it should still be delivered over TLS.
-	if !be.Messages[0].State.TLS.HandshakeComplete {
+	tlsState, ok := be.Messages[0].Conn.TLSConnectionState()
+	if !ok || !tlsState.HandshakeComplete {
 		t.Fatal("Message was not delivered over TLS")
 	}
 }
@@ -1019,7 +1019,6 @@ func TestMain(m *testing.M) {
 	flag.Parse()
 
 	if *remoteSmtpPort == "random" {
-		rand.Seed(time.Now().UnixNano())
 		*remoteSmtpPort = strconv.Itoa(rand.Intn(65536-10000) + 10000)
 	}
 

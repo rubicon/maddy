@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-message/textproto"
+	"github.com/emersion/go-smtp"
 	"github.com/foxcpp/maddy/framework/address"
 	"github.com/foxcpp/maddy/framework/buffer"
 	"github.com/foxcpp/maddy/framework/config"
@@ -142,12 +143,12 @@ func (rt *Target) Init(cfg *config.Map) error {
 	cfg.Duration("submission_timeout", false, false, 5*time.Minute, &rt.submissionTimeout)
 
 	poolCfg := pool.Config{
-		MaxKeys:             20000,
-		MaxConnsPerKey:      10,     // basically, max. amount of idle connections in cache
+		MaxKeys:             5000,
+		MaxConnsPerKey:      5,      // basically, max. amount of idle connections in cache
 		MaxConnLifetimeSec:  150,    // 2.5 mins, half of recommended idle time from RFC 5321
 		StaleKeyLifetimeSec: 60 * 5, // should be bigger than MaxConnLifetimeSec
 	}
-	cfg.Int("conn_max_idle_count", false, false, 10, &poolCfg.MaxConnsPerKey)
+	cfg.Int("conn_max_idle_count", false, false, 5, &poolCfg.MaxConnsPerKey)
 	cfg.Int64("conn_max_idle_time", false, false, 150, &poolCfg.MaxConnLifetimeSec)
 
 	if _, err := cfg.Process(); err != nil {
@@ -269,7 +270,7 @@ func (rt *Target) Start(ctx context.Context, msgMeta *module.MsgMetadata, mailFr
 	}, nil
 }
 
-func (rd *remoteDelivery) AddRcpt(ctx context.Context, to string) error {
+func (rd *remoteDelivery) AddRcpt(ctx context.Context, to string, opts smtp.RcptOptions) error {
 	defer trace.StartRegion(ctx, "remote/AddRcpt").End()
 
 	if rd.msgMeta.Quarantine {
@@ -311,9 +312,10 @@ func (rd *remoteDelivery) AddRcpt(ctx context.Context, to string) error {
 		return err
 	}
 
-	if err := conn.Rcpt(ctx, to); err != nil {
+	if err := conn.Rcpt(ctx, to, opts); err != nil {
 		return moduleError(err)
 	}
+	conn.lastUseAt = time.Now()
 
 	rd.recipients = append(rd.recipients, to)
 	return nil
@@ -404,8 +406,6 @@ func (rd *remoteDelivery) BodyNonAtomic(ctx context.Context, c module.StatusColl
 	var wg sync.WaitGroup
 
 	for i, conn := range rd.connections {
-		i := i
-		conn := conn
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -424,6 +424,7 @@ func (rd *remoteDelivery) BodyNonAtomic(ctx context.Context, c module.StatusColl
 				c.SetStatus(rcpt, err)
 			}
 			rd.connections[i].errored = err != nil
+			conn.lastUseAt = time.Now()
 		}()
 	}
 
@@ -445,12 +446,12 @@ func (rd *remoteDelivery) Close() error {
 		rd.rt.limits.ReleaseDest(conn.domain)
 		conn.transactions++
 
-		if conn.C == nil || conn.transactions > rd.rt.connReuseLimit || conn.C.Client() == nil || conn.errored {
-			rd.Log.Debugf("disconnected from %s (errored=%v,transactions=%v,disconnected before=%v)",
-				conn.ServerName(), conn.errored, conn.transactions, conn.C.Client() == nil)
+		if !conn.Usable() {
+			rd.Log.Debugf("disconnected %v from %s (errored=%v,transactions=%v,disconnected before=%v)",
+				conn.LocalAddr(), conn.ServerName(), conn.errored, conn.transactions, conn.C.Client() == nil)
 			conn.Close()
 		} else {
-			rd.Log.Debugf("returning connection for %s to pool", conn.ServerName())
+			rd.Log.Debugf("returning connection %v for %s to pool", conn.LocalAddr(), conn.ServerName())
 			rd.rt.pool.Return(conn.domain, conn)
 		}
 	}

@@ -20,7 +20,6 @@ package maddy
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,20 +27,24 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strings"
 
 	"github.com/caddyserver/certmagic"
 	parser "github.com/foxcpp/maddy/framework/cfgparser"
 	"github.com/foxcpp/maddy/framework/config"
+	modconfig "github.com/foxcpp/maddy/framework/config/module"
 	"github.com/foxcpp/maddy/framework/config/tls"
 	"github.com/foxcpp/maddy/framework/hooks"
 	"github.com/foxcpp/maddy/framework/log"
 	"github.com/foxcpp/maddy/framework/module"
+	"github.com/foxcpp/maddy/internal/authz"
+	maddycli "github.com/foxcpp/maddy/internal/cli"
+	"github.com/urfave/cli/v2"
 
 	// Import packages for side-effect of module registration.
 	_ "github.com/foxcpp/maddy/internal/auth/dovecot_sasl"
 	_ "github.com/foxcpp/maddy/internal/auth/external"
 	_ "github.com/foxcpp/maddy/internal/auth/ldap"
+	_ "github.com/foxcpp/maddy/internal/auth/netauth"
 	_ "github.com/foxcpp/maddy/internal/auth/pam"
 	_ "github.com/foxcpp/maddy/internal/auth/pass_table"
 	_ "github.com/foxcpp/maddy/internal/auth/plain_separate"
@@ -78,10 +81,7 @@ import (
 var (
 	Version = "go-build"
 
-	enableDebugFlags  = false
-	profileEndpoint   *string
-	blockProfileRate  *int
-	mutexProfileFract *int
+	enableDebugFlags = false
 )
 
 func BuildInfo() string {
@@ -101,96 +101,137 @@ default runtime_dir: %s`,
 		DefaultRuntimeDirectory)
 }
 
-// Run is the entry point for all maddy code. It takes care of command line arguments parsing,
-// logging initialization, directives setup, configuration reading. After all that, it
-// calls moduleMain to initialize and run modules.
-func Run() int {
-	certmagic.UserAgent = "maddy/" + Version
-
-	flag.StringVar(&config.LibexecDirectory, "libexec", DefaultLibexecDirectory, "path to the libexec directory")
-	flag.BoolVar(&log.DefaultLogger.Debug, "debug", false, "enable debug logging early")
-
-	var (
-		configPath   = flag.String("config", filepath.Join(ConfigDirectory, "maddy.conf"), "path to configuration file")
-		logTargets   = flag.String("log", "stderr", "default logging target(s)")
-		printVersion = flag.Bool("v", false, "print version and build metadata, then exit")
+func init() {
+	maddycli.AddGlobalFlag(
+		&cli.PathFlag{
+			Name:    "config",
+			Usage:   "Configuration file to use",
+			EnvVars: []string{"MADDY_CONFIG"},
+			Value:   filepath.Join(ConfigDirectory, "maddy.conf"),
+		},
 	)
+	maddycli.AddGlobalFlag(&cli.BoolFlag{
+		Name:        "debug",
+		Usage:       "enable debug logging early",
+		Destination: &log.DefaultLogger.Debug,
+	})
+	maddycli.AddSubcommand(&cli.Command{
+		Name:  "run",
+		Usage: "Start the server",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:        "libexec",
+				Value:       DefaultLibexecDirectory,
+				Usage:       "path to the libexec directory",
+				Destination: &config.LibexecDirectory,
+			},
+			&cli.StringSliceFlag{
+				Name:  "log",
+				Usage: "default logging target(s)",
+				Value: cli.NewStringSlice("stderr"),
+			},
+			&cli.BoolFlag{
+				Name:   "v",
+				Usage:  "print version and build metadata, then exit",
+				Hidden: true,
+			},
+		},
+		Action: Run,
+	})
+	maddycli.AddSubcommand(&cli.Command{
+		Name:  "version",
+		Usage: "Print version and build metadata, then exit",
+		Action: func(c *cli.Context) error {
+			fmt.Println(BuildInfo())
+			return nil
+		},
+	})
 
 	if enableDebugFlags {
-		profileEndpoint = flag.String("debug.pprof", "", "enable live profiler HTTP endpoint and listen on the specified address")
-		blockProfileRate = flag.Int("debug.blockprofrate", 0, "set blocking profile rate")
-		mutexProfileFract = flag.Int("debug.mutexproffract", 0, "set mutex profile fraction")
+		maddycli.AddGlobalFlag(&cli.StringFlag{
+			Name:  "debug.pprof",
+			Usage: "enable live profiler HTTP endpoint and listen on the specified address",
+		})
+		maddycli.AddGlobalFlag(&cli.IntFlag{
+			Name:  "debug.blockprofrate",
+			Usage: "set blocking profile rate",
+		})
+		maddycli.AddGlobalFlag(&cli.IntFlag{
+			Name:  "debug.mutexproffract",
+			Usage: "set mutex profile fraction",
+		})
+	}
+}
+
+// Run is the entry point for all server-running code. It takes care of command line arguments processing,
+// logging initialization, directives setup, configuration reading. After all that, it
+// calls moduleMain to initialize and run modules.
+func Run(c *cli.Context) error {
+	certmagic.UserAgent = "maddy/" + Version
+
+	if c.NArg() != 0 {
+		return cli.Exit(fmt.Sprintln("usage:", os.Args[0], "[options]"), 2)
 	}
 
-	flag.Parse()
-
-	if len(flag.Args()) != 0 {
-		fmt.Println("usage:", os.Args[0], "[options]")
-		return 2
-	}
-
-	if *printVersion {
+	if c.Bool("v") {
 		fmt.Println("maddy", BuildInfo())
-		return 0
+		return nil
 	}
 
 	var err error
-	log.DefaultLogger.Out, err = LogOutputOption(strings.Split(*logTargets, ","))
+	log.DefaultLogger.Out, err = LogOutputOption(c.StringSlice("log"))
 	if err != nil {
 		systemdStatusErr(err)
-		log.Println(err)
-		return 2
+		return cli.Exit(err.Error(), 2)
 	}
 
-	initDebug()
+	initDebug(c)
 
 	os.Setenv("PATH", config.LibexecDirectory+string(filepath.ListSeparator)+os.Getenv("PATH"))
 
-	f, err := os.Open(*configPath)
+	f, err := os.Open(c.Path("config"))
 	if err != nil {
 		systemdStatusErr(err)
-		log.Println(err)
-		return 2
+		return cli.Exit(err.Error(), 2)
 	}
 	defer f.Close()
 
-	cfg, err := parser.Read(f, *configPath)
+	cfg, err := parser.Read(f, c.Path("config"))
 	if err != nil {
 		systemdStatusErr(err)
-		log.Println(err)
-		return 2
+		return cli.Exit(err.Error(), 2)
 	}
 
 	defer log.DefaultLogger.Out.Close()
 
 	if err := moduleMain(cfg); err != nil {
 		systemdStatusErr(err)
-		log.Println(err)
-		return 2
+		return cli.Exit(err.Error(), 1)
 	}
 
-	return 0
+	return nil
 }
 
-func initDebug() {
+func initDebug(c *cli.Context) {
 	if !enableDebugFlags {
 		return
 	}
 
-	if *profileEndpoint != "" {
+	if c.IsSet("debug.pprof") {
+		profileEndpoint := c.String("debug.pprof")
 		go func() {
-			log.Println("listening on", "http://"+*profileEndpoint, "for profiler requests")
-			log.Println("failed to listen on profiler endpoint:", http.ListenAndServe(*profileEndpoint, nil))
+			log.Println("listening on", "http://"+profileEndpoint, "for profiler requests")
+			log.Println("failed to listen on profiler endpoint:", http.ListenAndServe(profileEndpoint, nil))
 		}()
 	}
 
 	// These values can also be affected by environment so set them
 	// only if argument is specified.
-	if *mutexProfileFract != 0 {
-		runtime.SetMutexProfileFraction(*mutexProfileFract)
+	if c.IsSet("debug.mutexproffract") {
+		runtime.SetMutexProfileFraction(c.Int("debug.mutexproffract"))
 	}
-	if *blockProfileRate != 0 {
-		runtime.SetBlockProfileRate(*blockProfileRate)
+	if c.IsSet("debug.blockprofrate") {
+		runtime.SetBlockProfileRate(c.Int("debug.blockprofrate"))
 	}
 }
 
@@ -243,7 +284,7 @@ func ensureDirectoryWritable(path string) error {
 		return err
 	}
 	testFile.Close()
-	return os.Remove(testFile.Name())
+	return os.RemoveAll(testFile.Name())
 }
 
 func ReadGlobals(cfg []config.Node) (map[string]interface{}, []config.Node, error) {
@@ -253,11 +294,14 @@ func ReadGlobals(cfg []config.Node) (map[string]interface{}, []config.Node, erro
 	globals.String("hostname", false, false, "", nil)
 	globals.String("autogenerated_msg_domain", false, false, "", nil)
 	globals.Custom("tls", false, false, nil, tls.TLSDirective, nil)
+	globals.Custom("tls_client", false, false, nil, tls.TLSClientBlock, nil)
 	globals.Bool("storage_perdomain", false, false, nil)
 	globals.Bool("auth_perdomain", false, false, nil)
 	globals.StringList("auth_domains", false, false, nil, nil)
 	globals.Custom("log", false, false, defaultLogOutput, logOutput, &log.DefaultLogger.Out)
 	globals.Bool("debug", false, log.DefaultLogger.Debug, &log.DefaultLogger.Debug)
+	config.EnumMapped(globals, "auth_map_normalize", true, false, authz.NormalizeFuncs, authz.NormalizeAuto, nil)
+	modconfig.Table(globals, "auth_map", true, false, nil, nil)
 	globals.AllowUnknown()
 	unknown, err := globals.Process()
 	return globals.Values, unknown, err
@@ -341,7 +385,6 @@ func RegisterModules(globals map[string]interface{}, nodes []config.Node) (endpo
 			return nil, nil, err
 		}
 
-		block := block
 		module.RegisterInstance(inst, config.NewMap(globals, block))
 		for _, alias := range modAliases {
 			if module.HasInstance(alias) {

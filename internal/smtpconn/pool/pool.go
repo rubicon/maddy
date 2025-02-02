@@ -26,6 +26,7 @@ import (
 
 type Conn interface {
 	Usable() bool
+	LastUseAt() time.Time
 	Close() error
 }
 
@@ -47,6 +48,8 @@ type P struct {
 	cfg      Config
 	keys     map[string]slot
 	keysLock sync.Mutex
+
+	cleanupStop chan struct{}
 }
 
 func New(cfg Config) *P {
@@ -56,32 +59,74 @@ func New(cfg Config) *P {
 		}
 	}
 
-	return &P{
-		cfg:  cfg,
-		keys: make(map[string]slot, cfg.MaxKeys),
+	p := &P{
+		cfg:         cfg,
+		keys:        make(map[string]slot, cfg.MaxKeys),
+		cleanupStop: make(chan struct{}),
+	}
+
+	go p.cleanUpTick(p.cleanupStop)
+
+	return p
+}
+
+func (p *P) cleanUpTick(stop chan struct{}) {
+	ctx := context.Background()
+	tick := time.NewTicker(time.Minute)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-tick.C:
+			p.CleanUp(ctx)
+		case <-stop:
+			return
+		}
+	}
+}
+
+func (p *P) CleanUp(ctx context.Context) {
+	p.keysLock.Lock()
+	defer p.keysLock.Unlock()
+
+	for k, v := range p.keys {
+		if v.lastUse+p.cfg.StaleKeyLifetimeSec > time.Now().Unix() {
+			continue
+		}
+
+		close(v.c)
+		for conn := range v.c {
+			go conn.Close()
+		}
+		delete(p.keys, k)
 	}
 }
 
 func (p *P) Get(ctx context.Context, key string) (Conn, error) {
-	// TODO: See if it is possible to get rid of this lock.
 	p.keysLock.Lock()
-	defer p.keysLock.Unlock()
 
 	bucket, ok := p.keys[key]
 	if !ok {
+		p.keysLock.Unlock()
 		return p.cfg.New(ctx, key)
 	}
 
 	if time.Now().Unix()-bucket.lastUse > p.cfg.MaxConnLifetimeSec {
 		// Drop bucket.
+		delete(p.keys, key)
 		close(bucket.c)
+
+		// Close might take some time, unlock early.
+		p.keysLock.Unlock()
+
 		for conn := range bucket.c {
 			conn.Close()
 		}
-		delete(p.keys, key)
 
 		return p.cfg.New(ctx, key)
 	}
+
+	p.keysLock.Unlock()
 
 	for {
 		var conn Conn
@@ -95,6 +140,12 @@ func (p *P) Get(ctx context.Context, key string) (Conn, error) {
 		}
 
 		if !conn.Usable() {
+			// Close might take some time, run in parallel.
+			go conn.Close()
+			continue
+		}
+		if conn.LastUseAt().Add(time.Duration(p.cfg.MaxConnLifetimeSec) * time.Second).Before(time.Now()) {
+			go conn.Close()
 			continue
 		}
 
@@ -118,12 +169,12 @@ func (p *P) Return(key string, c Conn) {
 				if v.lastUse+p.cfg.StaleKeyLifetimeSec > time.Now().Unix() {
 					continue
 				}
-
+				delete(p.keys, k)
 				close(v.c)
+
 				for conn := range v.c {
 					conn.Close()
 				}
-				delete(p.keys, k)
 			}
 		}
 
@@ -139,11 +190,13 @@ func (p *P) Return(key string, c Conn) {
 		bucket.lastUse = time.Now().Unix()
 	default:
 		// Let it go, let it go...
-		c.Close()
+		go c.Close()
 	}
 }
 
 func (p *P) Close() {
+	p.cleanupStop <- struct{}{}
+
 	p.keysLock.Lock()
 	defer p.keysLock.Unlock()
 

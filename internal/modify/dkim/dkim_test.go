@@ -21,7 +21,6 @@ package dkim
 import (
 	"bytes"
 	"context"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -58,10 +57,6 @@ func newTestModifier(t *testing.T, dir, keyAlgo string, domains []string) *Modif
 			{
 				Name: "key_path",
 				Args: []string{filepath.Join(dir, "{domain}.key")},
-			},
-			{
-				Name: "require_sender_match",
-				Args: []string{"off"},
 			},
 			{
 				Name: "newkey_algo",
@@ -111,7 +106,7 @@ func verifyTestMsg(t *testing.T, keysPath string, expectedDomains []string, hdr 
 	domainsMap := make(map[string]bool)
 	zones := map[string]mockdns.Zone{}
 	for _, domain := range expectedDomains {
-		dnsRecord, err := ioutil.ReadFile(filepath.Join(keysPath, domain+".dns"))
+		dnsRecord, err := os.ReadFile(filepath.Join(keysPath, domain+".dns"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -167,11 +162,7 @@ func TestGenerateSignVerify(t *testing.T) {
 	test := func(domains []string, envelopeFrom string, expectDomain []string, keyAlgo string, headerCanon, bodyCanon dkim.Canonicalization, reload bool) {
 		t.Helper()
 
-		dir, err := ioutil.TempDir("", "maddy-tests-dkim-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer os.RemoveAll(dir)
+		dir := t.TempDir()
 
 		m := newTestModifier(t, dir, keyAlgo, domains)
 		m.bodyCanon = bodyCanon
