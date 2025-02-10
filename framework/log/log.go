@@ -22,7 +22,6 @@ package log
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
 	"time"
@@ -81,7 +80,8 @@ func (l Logger) Println(val ...interface{}) {
 
 // Msg writes an event log message in a machine-readable format (currently
 // JSON).
-//   name: msg\t{"key":"value","key2":"value2"}
+//
+//	name: msg\t{"key":"value","key2":"value2"}
 //
 // Key-value pairs are built from fields slice which should contain key strings
 // followed by corresponding values.  That is, for example, []interface{"key",
@@ -103,7 +103,9 @@ func (l Logger) Msg(msg string, fields ...interface{}) {
 // JSON) containing information about the error. If err does have a Fields
 // method that returns map[string]interface{}, its result will be added to the
 // message.
-//   name: msg\t{"key":"value","key2":"value2"}
+//
+//	name: msg\t{"key":"value","key2":"value2"}
+//
 // Additionally, values from fields will be added to it, as handled by
 // Logger.Msg.
 //
@@ -199,7 +201,7 @@ func (l Logger) Write(s []byte) (int, error) {
 // Write method of returned object will be no-op.
 func (l Logger) DebugWriter() io.Writer {
 	if !l.Debug {
-		return ioutil.Discard
+		return io.Discard
 	}
 	l.Debug = true
 	return &l

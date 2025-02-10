@@ -28,9 +28,11 @@ import (
 	"github.com/emersion/go-sasl"
 	dovecotsasl "github.com/foxcpp/go-dovecot-sasl"
 	"github.com/foxcpp/maddy/framework/config"
+	modconfig "github.com/foxcpp/maddy/framework/config/module"
 	"github.com/foxcpp/maddy/framework/log"
 	"github.com/foxcpp/maddy/framework/module"
 	"github.com/foxcpp/maddy/internal/auth"
+	"github.com/foxcpp/maddy/internal/authz"
 )
 
 const modName = "dovecot_sasld"
@@ -67,22 +69,26 @@ func (endp *Endpoint) Init(cfg *config.Map) error {
 	cfg.Callback("auth", func(m *config.Map, node config.Node) error {
 		return endp.saslAuth.AddProvider(m, node)
 	})
+	cfg.Bool("sasl_login", false, false, &endp.saslAuth.EnableLogin)
+	config.EnumMapped(cfg, "auth_map_normalize", true, false, authz.NormalizeFuncs, authz.NormalizeAuto,
+		&endp.saslAuth.AuthNormalize)
+	modconfig.Table(cfg, "auth_map", true, false, nil, &endp.saslAuth.AuthMap)
 	if _, err := cfg.Process(); err != nil {
 		return err
 	}
 
 	endp.srv = dovecotsasl.NewServer()
 	endp.srv.Log = stdlog.New(endp.log, "", 0)
+	endp.saslAuth.Log.Debug = endp.log.Debug
 
 	for _, mech := range endp.saslAuth.SASLMechanisms() {
-		mech := mech
 		endp.srv.AddMechanism(mech, mechInfo[mech], func(req *dovecotsasl.AuthReq) sasl.Server {
 			var remoteAddr net.Addr
 			if req.RemoteIP != nil && req.RemotePort != 0 {
 				remoteAddr = &net.TCPAddr{IP: req.RemoteIP, Port: int(req.RemotePort)}
 			}
 
-			return endp.saslAuth.CreateSASL(mech, remoteAddr, func(_ string) error { return nil })
+			return endp.saslAuth.CreateSASL(mech, remoteAddr, func(_ string, _ auth.ContextData) error { return nil })
 		})
 	}
 

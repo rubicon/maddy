@@ -19,6 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -28,6 +29,8 @@ import (
 	modconfig "github.com/foxcpp/maddy/framework/config/module"
 	"github.com/foxcpp/maddy/framework/log"
 	"github.com/foxcpp/maddy/framework/module"
+	"github.com/foxcpp/maddy/internal/auth/sasllogin"
+	"github.com/foxcpp/maddy/internal/authz"
 )
 
 var (
@@ -38,11 +41,18 @@ var (
 // SASLAuth is a wrapper that initializes sasl.Server using authenticators that
 // call maddy module objects.
 //
+// It also handles username translation using auth_map and auth_map_normalize
+// (AuthMap and AuthMapNormalize should be set).
+//
 // It supports reporting of multiple authorization identities so multiple
 // accounts can be associated with a single set of credentials.
 type SASLAuth struct {
 	Log         log.Logger
 	OnlyFirstID bool
+	EnableLogin bool
+
+	AuthMap       module.Table
+	AuthNormalize authz.NormalizeFunc
 
 	Plain []module.PlainAuth
 }
@@ -51,10 +61,41 @@ func (s *SASLAuth) SASLMechanisms() []string {
 	var mechs []string
 
 	if len(s.Plain) != 0 {
-		mechs = append(mechs, sasl.Plain, sasl.Login)
+		mechs = append(mechs, sasl.Plain)
+		if s.EnableLogin {
+			mechs = append(mechs, sasl.Login)
+		}
 	}
 
 	return mechs
+}
+
+func (s *SASLAuth) usernameForAuth(ctx context.Context, saslUsername string) (string, error) {
+	if s.AuthNormalize != nil {
+		var err error
+		saslUsername, err = s.AuthNormalize(saslUsername)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	if s.AuthMap == nil {
+		return saslUsername, nil
+	}
+
+	mapped, ok, err := s.AuthMap.Lookup(ctx, saslUsername)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", ErrInvalidAuthCred
+	}
+
+	if saslUsername != mapped {
+		s.Log.DebugMsg("using mapped username for authentication", "username", saslUsername, "mapped_username", mapped)
+	}
+
+	return mapped, nil
 }
 
 func (s *SASLAuth) AuthPlain(username, password string) error {
@@ -64,7 +105,16 @@ func (s *SASLAuth) AuthPlain(username, password string) error {
 
 	var lastErr error
 	for _, p := range s.Plain {
-		lastErr = p.AuthPlain(username, password)
+		mappedUsername, err := s.usernameForAuth(context.TODO(), username)
+		if err != nil {
+			return err
+		}
+
+		s.Log.DebugMsg("attempting authentication",
+			"mapped_username", mappedUsername, "original_username", username,
+			"module", p)
+
+		lastErr = p.AuthPlain(mappedUsername, password)
 		if lastErr == nil {
 			return nil
 		}
@@ -73,14 +123,25 @@ func (s *SASLAuth) AuthPlain(username, password string) error {
 	return fmt.Errorf("no auth. provider accepted creds, last err: %w", lastErr)
 }
 
+type ContextData struct {
+	// Authentication username. May be different from identity.
+	Username string
+
+	// Password used for password-based mechanisms.
+	Password string
+}
+
 // CreateSASL creates the sasl.Server instance for the corresponding mechanism.
-func (s *SASLAuth) CreateSASL(mech string, remoteAddr net.Addr, successCb func(identity string) error) sasl.Server {
+func (s *SASLAuth) CreateSASL(mech string, remoteAddr net.Addr, successCb func(identity string, data ContextData) error) sasl.Server {
 	switch mech {
 	case sasl.Plain:
 		return sasl.NewPlainServer(func(identity, username, password string) error {
 			if identity == "" {
 				identity = username
 			}
+			if identity != username {
+				return ErrInvalidAuthCred
+			}
 
 			err := s.AuthPlain(username, password)
 			if err != nil {
@@ -88,17 +149,32 @@ func (s *SASLAuth) CreateSASL(mech string, remoteAddr net.Addr, successCb func(i
 				return ErrInvalidAuthCred
 			}
 
-			return successCb(identity)
+			return successCb(identity, ContextData{
+				Username: username,
+				Password: password,
+			})
 		})
 	case sasl.Login:
-		return sasl.NewLoginServer(func(username, password string) error {
-			err := s.AuthPlain(username, password)
+		if !s.EnableLogin {
+			return FailingSASLServ{Err: ErrUnsupportedMech}
+		}
+
+		return sasllogin.NewLoginServer(func(username, password string) error {
+			username, err := s.usernameForAuth(context.Background(), username)
+			if err != nil {
+				return err
+			}
+
+			err = s.AuthPlain(username, password)
 			if err != nil {
 				s.Log.Error("authentication failed", err, "username", username, "src_ip", remoteAddr)
 				return ErrInvalidAuthCred
 			}
 
-			return successCb(username)
+			return successCb(username, ContextData{
+				Username: username,
+				Password: password,
+			})
 		})
 	}
 	return FailingSASLServ{Err: ErrUnsupportedMech}

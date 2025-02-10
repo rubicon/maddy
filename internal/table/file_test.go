@@ -19,7 +19,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package table
 
 import (
-	"io/ioutil"
 	"os"
 	"reflect"
 	"testing"
@@ -33,7 +32,7 @@ func TestReadFile(t *testing.T) {
 	test := func(file string, expected map[string][]string) {
 		t.Helper()
 
-		f, err := ioutil.TempFile("", "maddy-tests-")
+		f, err := os.CreateTemp("", "maddy-tests-")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -66,7 +65,8 @@ func TestReadFile(t *testing.T) {
 	test(`"a @ a"@example.org: b@example.com`, map[string][]string{`"a @ a"@example.org`: {"b@example.com"}})
 	test(`a@example.org: "b @ b"@example.com`, map[string][]string{`a@example.org`: {`"b @ b"@example.com`}})
 	test(`"a @ a": "b @ b"`, map[string][]string{`"a @ a"`: {`"b @ b"`}})
-	test("a: b, c", map[string][]string{"a": {"b, c"}})
+	test("a: b, c", map[string][]string{"a": {"b", "c"}})
+	test("a: b\na: c", map[string][]string{"a": {"b", "c"}})
 	test(": b", nil)
 	test(":", nil)
 	test("aaa", map[string][]string{"aaa": {""}})
@@ -87,7 +87,7 @@ func TestFileReload(t *testing.T) {
 
 	const file = `cat: dog`
 
-	f, err := ioutil.TempFile("", "maddy-tests-")
+	f, err := os.CreateTemp("", "maddy-tests-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,27 +110,26 @@ func TestFileReload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// This delay is somehow important. Not sure why.
-	time.Sleep(250 * time.Millisecond)
-
-	if err := ioutil.WriteFile(f.Name(), []byte("dog: cat"), os.ModePerm); err != nil {
-		t.Fatal(err)
+	// ensure it is correctly loaded at first time.
+	m.mLck.RLock()
+	if m.m["cat"] == nil {
+		t.Fatalf("wrong content loaded, new m were not loaded, %v", m.m)
 	}
+	m.mLck.RUnlock()
 
-	for i := 0; i < 10; i++ {
-		time.Sleep(reloadInterval + 50*time.Millisecond)
+	for i := 0; i < 100; i++ {
+		// try to provoke race condition on file writing
+		if i%2 == 0 {
+			if err := os.WriteFile(f.Name(), []byte("dog: cat"), os.ModePerm); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(reloadInterval + 5*time.Millisecond)
 		m.mLck.RLock()
-		if m.m["dog"] != nil {
-			m.mLck.RUnlock()
-			break
+		if m.m["dog"] == nil {
+			t.Fatalf("wrong content loaded, new m were not loaded, %v", m.m)
 		}
 		m.mLck.RUnlock()
-	}
-
-	m.mLck.RLock()
-	defer m.mLck.RUnlock()
-	if m.m["dog"] == nil {
-		t.Fatal("New m were not loaded")
 	}
 }
 
@@ -139,7 +138,7 @@ func TestFileReload_Broken(t *testing.T) {
 
 	const file = `cat: dog`
 
-	f, err := ioutil.TempFile("", "maddy-tests-")
+	f, err := os.CreateTemp("", "maddy-tests-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +184,7 @@ func TestFileReload_Removed(t *testing.T) {
 
 	const file = `cat: dog`
 
-	f, err := ioutil.TempFile("", "maddy-tests-")
+	f, err := os.CreateTemp("", "maddy-tests-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,9 +206,6 @@ func TestFileReload_Removed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// This delay is somehow important. Not sure why.
-	time.Sleep(250 * time.Millisecond)
-
 	os.Remove(f.Name())
 
 	time.Sleep(3 * reloadInterval)
@@ -222,5 +218,5 @@ func TestFileReload_Removed(t *testing.T) {
 }
 
 func init() {
-	reloadInterval = 250 * time.Millisecond
+	reloadInterval = 10 * time.Millisecond
 }

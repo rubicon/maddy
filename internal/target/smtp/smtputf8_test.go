@@ -40,6 +40,10 @@ func TestDownstreamDelivery_EHLO_ALabel(t *testing.T) {
 				Name: "hostname",
 				Args: []string{"тест.invalid"},
 			},
+			{
+				Name: "starttls",
+				Args: []string{"no"},
+			},
 		},
 	})); err != nil {
 		t.Fatal(err)
@@ -51,7 +55,7 @@ func TestDownstreamDelivery_EHLO_ALabel(t *testing.T) {
 	testutils.DoTestDelivery(t, tgt, "test@example.com", []string{"test@example.invalid"})
 
 	be.CheckMsg(t, 0, "test@example.com", []string{"test@example.invalid"})
-	if be.Messages[0].State.Hostname != "xn--e1aybc.invalid" {
+	if be.Messages[0].Conn.Hostname() != "xn--e1aybc.invalid" {
 		t.Error("target/remote should use use Punycode in EHLO")
 	}
 }
