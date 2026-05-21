@@ -521,7 +521,7 @@ func moduleReload(oldContainer *container.C, configPath string, asyncStopWg *syn
 			newContainer.DefaultLogger.Error("failed to close old server log", err)
 		}
 
-		systemdStatus(SDReloading, "Configuration running.")
+		systemdStatus(SDReady, "Configuration running.")
 	}()
 
 	return newContainer
